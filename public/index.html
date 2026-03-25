@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Composite Voice + Tapes Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #0a0a0f; --surface: #12121a; --surface-2: #1a1a26;
+      --border: #2a2a3a; --text: #e4e4ef; --text-dim: #8888a0;
+      --accent: #6c5ce7; --green: #00d68f; --orange: #f0a030;
+      --red: #ff6b6b; --blue: #4fc3f7;
+    }
+    body {
+      font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+      background: var(--bg); color: var(--text);
+      height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+    }
+
+    /* Header */
+    header {
+      padding: 16px 24px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
+    }
+    header h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.5px; }
+    header h1 span { color: var(--accent); }
+    .header-right { display: flex; align-items: center; gap: 16px; }
+    .tagline { font-size: 11px; color: var(--text-dim); letter-spacing: 0.3px; }
+    .playground-link {
+      font-size: 10px; padding: 4px 10px; border-radius: 4px;
+      border: 1px solid var(--border); background: var(--surface);
+      color: var(--green); text-decoration: none; letter-spacing: 0.5px; transition: all 0.2s;
+    }
+    .playground-link:hover { border-color: var(--green); background: rgba(0,214,143,0.08); }
+
+    /* Panels */
+    .panels { display: flex; flex: 1; overflow: hidden; }
+    .panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .panel:first-child { border-right: 1px solid var(--border); }
+    .panel-header {
+      padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--border);
+      font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px;
+      color: var(--text-dim); flex-shrink: 0;
+    }
+    .panel-body { flex: 1; overflow-y: auto; padding: 16px 20px; }
+
+    /* Mic */
+    .status-dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: var(--red); margin-right: 6px;
+    }
+    .status-dot.connected { background: var(--green); }
+    .status-dot.listening { background: var(--green); animation: pulse 1.5s infinite; }
+    @keyframes pulse {
+      0%,100% { opacity:1; box-shadow: 0 0 0 0 rgba(0,214,143,0.4); }
+      50% { opacity:0.8; box-shadow: 0 0 0 6px rgba(0,214,143,0); }
+    }
+    .mic-area { display: flex; flex-direction: column; align-items: center; padding: 40px 0 24px; flex-shrink: 0; }
+    .mic-btn {
+      width: 80px; height: 80px; border-radius: 50%; border: 2px solid var(--border);
+      background: var(--surface); color: var(--text-dim); cursor: pointer;
+      transition: all 0.2s; display: flex; align-items: center; justify-content: center;
+    }
+    .mic-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .mic-btn.muted { border-color: var(--red); background: rgba(255,107,107,0.1); color: var(--red); }
+    .mic-btn.active { border-color: var(--green); background: rgba(0,214,143,0.1); color: var(--green); box-shadow: 0 0 20px rgba(0,214,143,0.2); }
+    .mic-label { margin-top: 12px; font-size: 11px; color: var(--text-dim); }
+    .agent-state { margin-top: 8px; font-size: 10px; color: var(--accent); text-transform: uppercase; letter-spacing: 1px; }
+
+    /* Chat */
+    .transcript { display: flex; flex-direction: column; gap: 12px; }
+    .msg { max-width: 85%; padding: 10px 14px; border-radius: 8px; font-size: 13px; line-height: 1.5; word-wrap: break-word; }
+    .msg.user { align-self: flex-end; background: var(--accent); color: white; }
+    .msg.assistant { align-self: flex-start; background: var(--surface-2); border: 1px solid var(--border); }
+    .msg.interim { align-self: flex-end; background: transparent; border: 1px dashed var(--border); color: var(--text-dim); font-style: italic; }
+
+    /* Tabs */
+    .tabs {
+      display: flex; gap: 0; border-bottom: 1px solid var(--border);
+      background: var(--surface); flex-shrink: 0;
+    }
+    .tab {
+      padding: 10px 16px; font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+      color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent;
+      transition: all 0.2s; background: none; border-top: none; border-left: none; border-right: none;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* Trace items */
+    .trace-item {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+      padding: 12px 16px; margin-bottom: 8px; font-size: 12px; animation: slideIn 0.3s ease-out;
+    }
+    @keyframes slideIn { from { opacity:0; transform: translateY(-8px); } to { opacity:1; transform: translateY(0); } }
+    .trace-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .trace-provider { font-weight: 600; font-size: 12px; }
+    .trace-provider.anthropic-llm { color: var(--accent); }
+    .trace-provider.deepgram-stt { color: var(--blue); }
+    .trace-provider.deepgram-tts { color: var(--orange); }
+    .trace-latency { font-size: 11px; color: var(--green); font-weight: 600; }
+    .trace-latency.slow { color: var(--orange); }
+    .trace-latency.very-slow { color: var(--red); }
+    .trace-details { display: flex; gap: 16px; font-size: 10px; color: var(--text-dim); }
+    .trace-detail { display: flex; align-items: center; gap: 4px; }
+    .trace-status { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+    .trace-status.error { background: var(--red); }
+    .trace-empty { text-align: center; padding: 40px; color: var(--text-dim); font-size: 12px; }
+    .trace-count { float: right; font-size: 10px; color: var(--text-dim); font-weight: 400; text-transform: none; letter-spacing: 0; }
+
+    /* Stats cards */
+    .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+    .stat-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+      padding: 14px 16px;
+    }
+    .stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); margin-bottom: 6px; }
+    .stat-value { font-size: 20px; font-weight: 700; }
+    .stat-value.green { color: var(--green); }
+    .stat-value.accent { color: var(--accent); }
+    .stat-value.orange { color: var(--orange); }
+    .stat-value.blue { color: var(--blue); }
+    .stat-sub { font-size: 10px; color: var(--text-dim); margin-top: 4px; }
+
+    /* Bar chart */
+    .bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 11px; }
+    .bar-label { width: 100px; text-align: right; color: var(--text-dim); flex-shrink: 0; }
+    .bar-track { flex: 1; height: 20px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 3px; display: flex; align-items: center; padding-left: 8px; font-size: 10px; color: white; font-weight: 600; min-width: 40px; transition: width 0.5s ease; }
+    .bar-fill.stt { background: var(--blue); }
+    .bar-fill.llm { background: var(--accent); }
+    .bar-fill.tts { background: var(--orange); }
+
+    .section-title { font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--text-dim); margin: 20px 0 12px; }
+    .section-title:first-child { margin-top: 0; }
+
+    /* Session list */
+    .session-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 14px; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; margin-bottom: 6px; font-size: 11px;
+    }
+    .session-label { color: var(--text); max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-cost { color: var(--green); font-weight: 600; }
+    .session-tokens { color: var(--text-dim); font-size: 10px; }
+
+    /* Observation items */
+    .obs-item {
+      padding: 10px 14px; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; margin-bottom: 6px; font-size: 11px; animation: slideIn 0.3s ease-out;
+    }
+    .obs-item .obs-priority {
+      display: inline-block; font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px;
+      padding: 1px 6px; border-radius: 3px; margin-right: 8px; font-weight: 600;
+    }
+    .obs-priority.important { background: rgba(255,107,107,0.15); color: var(--red); }
+    .obs-priority.possible { background: rgba(240,160,48,0.15); color: var(--orange); }
+    .obs-priority.informational { background: rgba(79,195,247,0.15); color: var(--blue); }
+    .obs-time { font-size: 9px; color: var(--text-dim); float: right; }
+
+    /* Anomaly items */
+    .anomaly-item {
+      padding: 10px 14px; background: var(--surface); border-radius: 6px; margin-bottom: 6px;
+      font-size: 11px; animation: slideIn 0.3s ease-out;
+    }
+    .anomaly-item.warning { border: 1px solid rgba(240,160,48,0.3); }
+    .anomaly-item.critical { border: 1px solid rgba(255,107,107,0.3); }
+    .anomaly-type {
+      font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; margin-bottom: 4px;
+    }
+    .anomaly-type.latency_spike { color: var(--orange); }
+    .anomaly-type.latency_trend { color: var(--red); }
+    .anomaly-type.token_spike { color: var(--accent); }
+    .anomaly-type.cost_outlier { color: var(--green); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span>Composite Voice</span> + <span>Tapes</span></h1>
+    <div class="header-right">
+      <div class="tagline">See everything your voice agent does. Change zero lines of code.</div>
+      <select id="sessionPicker" class="playground-link" style="background:var(--surface);color:var(--text-dim);border:1px solid var(--border);font-family:inherit;cursor:pointer">
+        <option value="current">Current session</option>
+      </select>
+      <button class="playground-link" onclick="clearSession()" style="color:var(--orange);cursor:pointer;border:1px solid var(--border);background:var(--surface)">Clear Session</button>
+      <a class="playground-link" href="https://playground.deepgram.com" target="_blank" rel="noopener">Deepgram Playground</a>
+    </div>
+  </header>
+
+  <div class="panels">
+    <!-- Voice Panel -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="status-dot" id="statusDot"></span>
+        Voice Agent
+      </div>
+      <div class="mic-area">
+        <div style="display:flex;gap:16px;align-items:center">
+          <button class="mic-btn" id="micBtn" onclick="toggleMic()">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+          </button>
+          <button class="mic-btn" id="muteBtn" onclick="toggleMute()" style="width:50px;height:50px;display:none" title="Mute">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" id="muteIcon">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <line x1="1" y1="1" x2="23" y2="23"/>
+            </svg>
+          </button>
+        </div>
+        <div class="mic-label" id="micLabel">Click to start</div>
+        <div class="agent-state" id="agentState"></div>
+      </div>
+      <div class="panel-body" id="transcriptArea">
+        <div class="transcript" id="transcript"></div>
+      </div>
+    </div>
+
+    <!-- Traces Panel -->
+    <div class="panel">
+      <div class="tabs">
+        <button class="tab active" data-tab="latency">Latency</button>
+        <button class="tab" data-tab="cost">Cost</button>
+        <button class="tab" data-tab="memory">Memory</button>
+        <button class="tab" data-tab="anomalies">Anomalies</button>
+        <button class="tab" data-tab="traces">Traces</button>
+      </div>
+      <div class="panel-body" id="tracesArea">
+
+        <!-- Latency Tab -->
+        <div class="tab-content active" id="tab-latency">
+          <div class="section-title">Per-provider latency (this session)</div>
+          <div id="latencyBars">
+            <div class="bar-row"><span class="bar-label">STT processing</span><div class="bar-track"><div class="bar-fill stt" id="barSTT" style="width:0%"></div></div></div>
+            <div class="bar-row"><span class="bar-label">LLM generation</span><div class="bar-track"><div class="bar-fill llm" id="barLLM" style="width:0%"></div></div></div>
+            <div class="bar-row"><span class="bar-label">TTS synthesis</span><div class="bar-track"><div class="bar-fill tts" id="barTTS" style="width:0%"></div></div></div>
+          </div>
+          <div class="stat-grid" id="latencyStats">
+            <div class="stat-card"><div class="stat-label">Speech → LLM</div><div class="stat-value blue" id="sttAvg">--</div></div>
+            <div class="stat-card"><div class="stat-label">LLM generation</div><div class="stat-value accent" id="llmAvg">--</div></div>
+            <div class="stat-card"><div class="stat-label">TTS synthesis</div><div class="stat-value orange" id="ttsAvg">--</div></div>
+            <div class="stat-card"><div class="stat-label">Total turns</div><div class="stat-value green" id="totalTurns">0</div></div>
+          </div>
+          <div class="section-title">Bottleneck</div>
+          <div id="bottleneck" class="stat-card" style="text-align:center;">
+            <div class="stat-label">Waiting for voice data...</div>
+          </div>
+        </div>
+
+        <!-- Cost Tab -->
+        <div class="tab-content" id="tab-cost">
+          <div class="section-title">Session cost breakdown</div>
+          <div class="stat-grid">
+            <div class="stat-card"><div class="stat-label">Total cost</div><div class="stat-value green" id="totalCost">$0.0000</div></div>
+            <div class="stat-card"><div class="stat-label">LLM tokens</div><div class="stat-value accent" id="totalTokens">0</div></div>
+            <div class="stat-card"><div class="stat-label">Input tokens</div><div class="stat-value blue" id="inputTokens">0</div><div class="stat-sub" id="inputCost">$0.00</div></div>
+            <div class="stat-card"><div class="stat-label">Output tokens</div><div class="stat-value orange" id="outputTokens">0</div><div class="stat-sub" id="outputCost">$0.00</div></div>
+          </div>
+          <div class="section-title">Per-turn breakdown</div>
+          <div id="turnList"><div class="trace-empty">Token usage appears here after each voice turn.</div></div>
+        </div>
+
+        <!-- Memory Tab -->
+        <div class="tab-content" id="tab-memory">
+          <div class="section-title">Stored Memories</div>
+          <div id="memoryList"><div class="trace-empty">Tell the agent something about yourself. It will remember across turns.</div></div>
+          <div class="section-title">Observations</div>
+          <div id="observationList"><div class="trace-empty">Observations are extracted from usage patterns as you talk.</div></div>
+        </div>
+
+        <!-- Anomalies Tab -->
+        <div class="tab-content" id="tab-anomalies">
+          <div class="section-title">Anomaly Detection</div>
+          <div class="stat-grid">
+            <div class="stat-card"><div class="stat-label">Anomalies found</div><div class="stat-value" id="anomalyCount" style="color:var(--green)">0</div></div>
+            <div class="stat-card"><div class="stat-label">Status</div><div class="stat-value" id="anomalyStatus" style="color:var(--green);font-size:14px">Normal</div></div>
+          </div>
+          <div id="anomalyList"><div class="trace-empty">Anomalies are detected from latency spikes, token jumps, and cost outliers.</div></div>
+        </div>
+
+        <!-- Raw Traces Tab -->
+        <div class="tab-content" id="tab-traces">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <div class="section-title" style="margin:0">Live request log</div>
+            <span class="trace-count" id="traceCount">0 requests</span>
+          </div>
+          <div id="traces">
+            <div class="trace-empty">Traces appear here as the voice agent makes API calls.</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import {
+      CompositeVoice, DeepgramSTT, AnthropicLLM, DeepgramTTS,
+    } from '/sdk/index.mjs';
+
+    const proxyBase = window.location.origin + '/proxy';
+
+    const agent = new CompositeVoice({
+      providers: [
+        new DeepgramSTT({ proxyUrl: `${proxyBase}/deepgram`, options: { model: 'nova-3', smartFormat: true, interimResults: true, endpointing: 300 } }),
+        new AnthropicLLM({ proxyUrl: `${proxyBase}/anthropic`, model: 'claude-haiku-4-5-20251001', systemPrompt: 'You are a helpful voice assistant. Keep responses brief — under 2 sentences.', maxTokens: 150 }),
+        new DeepgramTTS({ proxyUrl: `${proxyBase}/deepgram`, options: { model: 'aura-2-thalia-en', encoding: 'linear16', sampleRate: 24000 } }),
+      ],
+      conversationHistory: { enabled: true, maxTurns: 6 },
+    });
+
+    // ── UI refs ──
+    let isListening = false, interimEl = null, currentAssistantEl = null, traceCount = 0;
+    const $ = (id) => document.getElementById(id);
+
+    // ── Tabs ──
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        tab.classList.add('active');
+        $(`tab-${tab.dataset.tab}`).classList.add('active');
+      });
+    });
+
+    // ── Latency tracking ──
+    const latencies = { stt: [], llm: [], tts: [] };
+    let turnTimers = {};
+
+    function recordLatency(provider, ms) {
+      if (provider === 'stt') latencies.stt.push(ms);
+      else if (provider === 'llm') latencies.llm.push(ms);
+      else if (provider === 'tts') latencies.tts.push(ms);
+      updateLatencyUI();
+    }
+
+    function updateLatencyUI() {
+      const avg = arr => arr.length ? Math.round(arr.reduce((a,b) => a+b, 0) / arr.length) : 0;
+      const stt = avg(latencies.stt), llm = avg(latencies.llm), tts = avg(latencies.tts);
+      const max = Math.max(stt, llm, tts, 1);
+
+      $('barSTT').style.width = `${(stt/max)*100}%`;
+      $('barSTT').textContent = stt ? `${stt}ms` : '';
+      $('barLLM').style.width = `${(llm/max)*100}%`;
+      $('barLLM').textContent = llm ? `${llm}ms` : '';
+      $('barTTS').style.width = `${(tts/max)*100}%`;
+      $('barTTS').textContent = tts ? `${tts}ms` : '';
+
+      $('sttAvg').textContent = stt ? `${stt}ms` : '--';
+      $('llmAvg').textContent = llm ? `${llm}ms` : '--';
+      $('ttsAvg').textContent = tts ? `${tts}ms` : '--';
+      $('totalTurns').textContent = latencies.llm.length;
+
+      // Bottleneck
+      const bn = $('bottleneck');
+      if (stt + llm + tts === 0) {
+        bn.innerHTML = '<div class="stat-label">Waiting for voice data...</div>';
+      } else {
+        const bottleneck = stt >= llm && stt >= tts ? ['Deepgram STT', 'blue', stt]
+          : llm >= tts ? ['Anthropic LLM', 'accent', llm]
+          : ['Deepgram TTS', 'orange', tts];
+        bn.innerHTML = `<div class="stat-value ${bottleneck[1]}">${bottleneck[0]}</div><div class="stat-sub">Averaging ${bottleneck[2]}ms — slowest provider in the pipeline</div>`;
+      }
+    }
+
+    // ── Cost tracking (polls server for real Anthropic usage data) ──
+    let lastTurnCount = -1;
+    let viewingPastSession = false;
+
+    async function pollUsage() {
+      if (viewingPastSession) return;
+      try {
+        const data = await (await fetch('/api/usage')).json();
+        if (!data?.totals) return;
+        const t = data.totals;
+
+        $('totalCost').textContent = `$${t.totalCost.toFixed(4)}`;
+        $('totalTokens').textContent = t.totalTokens.toLocaleString();
+        $('inputTokens').textContent = t.inputTokens.toLocaleString();
+        $('outputTokens').textContent = t.outputTokens.toLocaleString();
+
+        // Compute cost split for display
+        const turns = data.turns || [];
+        let inputCost = 0, outputCost = 0;
+        for (const turn of turns) {
+          inputCost += (turn.cost?.input || 0) + (turn.cost?.cacheRead || 0) + (turn.cost?.cacheCreation || 0);
+          outputCost += turn.cost?.output || 0;
+        }
+        $('inputCost').textContent = `$${inputCost.toFixed(6)}`;
+        $('outputCost').textContent = `$${outputCost.toFixed(6)}`;
+
+        // Render per-turn breakdown if new turns arrived
+        if (turns.length !== lastTurnCount) {
+          lastTurnCount = turns.length;
+          const list = $('turnList');
+          list.innerHTML = '';
+          for (const turn of [...turns].reverse()) {
+            const c = turn.cost;
+            const turnCost = (c.input + c.output + c.cacheRead + c.cacheCreation);
+            const time = new Date(turn.timestamp).toLocaleTimeString();
+            const el = document.createElement('div');
+            el.className = 'session-row';
+            el.innerHTML = `
+              <span class="session-label" style="max-width:40%">${time} &middot; ${turn.model}</span>
+              <span class="session-tokens">${turn.inputTokens} in / ${turn.outputTokens} out</span>
+              <span class="session-cost">$${turnCost.toFixed(6)}</span>
+            `;
+            list.appendChild(el);
+          }
+        }
+      } catch { /* server not ready */ }
+    }
+
+    setInterval(pollUsage, 2000);
+
+    // ── Agent events ──
+    agent.on('agent.ready', () => { $('statusDot').classList.add('connected'); });
+    agent.on('agent.stateChange', (e) => {
+      $('agentState').textContent = e.state;
+      $('statusDot').className = e.state === 'listening' ? 'status-dot listening' : 'status-dot connected';
+    });
+    agent.on('agent.error', (e) => console.error('Agent error:', e.error));
+
+    agent.on('transcription.interim', (e) => {
+      if (!interimEl) interimEl = addMsg('interim', '');
+      interimEl.textContent = e.text;
+      scrollToBottom();
+    });
+
+    // Only show the final utterance from speechFinal — skip transcription.final to avoid duplicates
+    agent.on('transcription.final', () => {});
+
+    agent.on('transcription.speechFinal', (e) => {
+      if (interimEl) { interimEl.remove(); interimEl = null; }
+      if (e.text?.trim()) {
+        const text = e.text.trim();
+
+        // Mark end of speech — this is when latency counting starts
+        turnTimers.speechEnd = performance.now();
+
+        // Check for "save this to memory" voice command
+        const saveCmd = text.toLowerCase();
+        if (saveCmd.includes('save this to memory') || saveCmd.includes('save that to memory') || saveCmd.includes('remember that')) {
+          if (lastUserUtterance) {
+            fetch('/api/memories', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ content: lastUserUtterance }),
+            }).then(() => pollMemories());
+            addMsg('user', text);
+            addMsg('assistant', `Saved to memory: "${lastUserUtterance}"`);
+            return;
+          }
+        }
+
+        lastUserUtterance = text;
+        addMsg('user', text);
+        addTrace('Deepgram STT', null, null, 200, 'WS', '/v1/listen');
+      }
+    });
+
+    agent.on('llm.start', () => {
+      turnTimers.llmStart = performance.now();
+      // Time from end of speech to LLM starting = the gap the user feels
+      if (turnTimers.speechEnd) {
+        recordLatency('stt', Math.round(performance.now() - turnTimers.speechEnd));
+      }
+      currentAssistantEl = addMsg('assistant', '');
+    });
+    agent.on('llm.chunk', (e) => {
+      // Record time-to-first-token once
+      if (currentAssistantEl && !turnTimers.firstToken) {
+        turnTimers.firstToken = performance.now();
+        if (turnTimers.speechEnd) {
+          const ttft = Math.round(turnTimers.firstToken - turnTimers.speechEnd);
+          addTrace('Time to first token', ttft, null, 200, 'TTFT', 'speech-end → first-token');
+        }
+      }
+      if (currentAssistantEl) { currentAssistantEl.textContent += e.chunk; scrollToBottom(); }
+    });
+    agent.on('llm.complete', (e) => {
+      const ms = turnTimers.llmStart ? Math.round(performance.now() - turnTimers.llmStart) : null;
+      if (ms) recordLatency('llm', ms);
+      turnTimers.firstToken = null;
+      addTrace('Anthropic LLM', ms, e.tokensUsed || null, 200, 'POST', '/v1/messages');
+      // Strip [MEMORY: ...] tags from the displayed assistant message
+      if (currentAssistantEl) {
+        currentAssistantEl.textContent = currentAssistantEl.textContent.replace(/\s*\[MEMORY:\s*[^\]]*\]/gi, '').trim();
+      }
+      currentAssistantEl = null;
+      pollUsage();
+      pollMemories();
+    });
+
+    agent.on('tts.start', () => { turnTimers.ttsStart = performance.now(); });
+    agent.on('tts.complete', () => {
+      const ms = turnTimers.ttsStart ? Math.round(performance.now() - turnTimers.ttsStart) : null;
+      if (ms) recordLatency('tts', ms);
+      addTrace('Deepgram TTS', ms, null, 200, 'WS', '/v1/speak');
+
+      // Report full pipeline latency to server for anomaly detection
+      if (turnTimers.speechEnd) {
+        const totalMs = Math.round(performance.now() - turnTimers.speechEnd);
+        const sttMs = latencies.stt.at(-1) || 0;
+        const llmMs = latencies.llm.at(-1) || 0;
+        const ttsMs = ms || 0;
+        fetch('/api/latency', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sttMs, llmMs, ttsMs, totalMs }),
+        });
+        turnTimers.speechEnd = null;
+      }
+    });
+
+    // ── Mic toggle + mute ──
+    let initialized = false;
+    let toggling = false;
+    let muted = false;
+
+    window.toggleMic = async () => {
+      if (toggling) return;
+      toggling = true;
+
+      try {
+        if (!isListening) {
+          $('micLabel').textContent = 'Connecting...';
+          if (!initialized) {
+            await agent.initialize();
+            initialized = true;
+          }
+          await agent.startListening();
+          isListening = true;
+          $('micBtn').classList.add('active');
+          $('muteBtn').style.display = 'flex';
+          $('micLabel').textContent = 'Listening...';
+        } else {
+          await agent.stopListening();
+          isListening = false;
+          muted = false;
+          $('micBtn').classList.remove('active');
+          $('muteBtn').style.display = 'none';
+          $('muteBtn').classList.remove('muted');
+          $('micLabel').textContent = 'Click to start';
+          $('agentState').textContent = '';
+          $('statusDot').className = 'status-dot connected';
+        }
+      } catch (err) {
+        console.error('Start error:', err);
+        $('micLabel').textContent = `Error: ${err.message || err}`;
+        isListening = false;
+        $('micBtn').classList.remove('active');
+      } finally {
+        toggling = false;
+      }
+    };
+
+    window.toggleMute = () => {
+      if (!isListening) return;
+      muted = !muted;
+      $('muteBtn').classList.toggle('muted', muted);
+      $('micLabel').textContent = muted ? 'Muted' : 'Listening...';
+      // Mute/unmute the microphone input stream
+      if (agent.providers) {
+        for (const p of agent.providers) {
+          if (p.mediaStream) {
+            p.mediaStream.getAudioTracks().forEach(t => { t.enabled = !muted; });
+          }
+        }
+      }
+    };
+
+    window.deleteMemory = async (index) => {
+      await fetch(`/api/memories/${index}`, { method: 'DELETE' });
+      lastMemCount = -1;
+      pollMemories();
+    };
+
+    // ── "Save this to memory" voice command ──
+    let lastUserUtterance = '';
+
+    // ── Poll memories, observations & anomalies ──
+    let lastMemCount = -1;
+
+    async function pollMemories() {
+      try {
+        const data = await (await fetch('/api/memories')).json();
+        if (!Array.isArray(data) || (data.length === lastMemCount && lastMemCount !== -1)) return;
+        lastMemCount = data.length;
+
+        const list = $('memoryList');
+        list.innerHTML = '';
+        if (data.length === 0) {
+          list.innerHTML = '<div class="trace-empty">Tell the agent something about yourself. It will remember across turns.</div>';
+          return;
+        }
+        data.forEach((mem, i) => {
+          const el = document.createElement('div');
+          el.className = 'obs-item';
+          el.style.display = 'flex';
+          el.style.alignItems = 'center';
+          el.style.justifyContent = 'space-between';
+          const time = new Date(mem.timestamp).toLocaleTimeString();
+          el.innerHTML = `<div><span class="obs-priority important" style="background:rgba(108,92,231,0.15);color:var(--accent)">memory</span>${mem.content}</div><button onclick="deleteMemory(${i})" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;padding:0 4px;flex-shrink:0" title="Delete">&times;</button>`;
+          list.appendChild(el);
+        });
+      } catch {}
+    }
+
+    let lastObsCount = -1;
+
+    async function pollObservations() {
+      try {
+        const data = await (await fetch('/api/observations')).json();
+        if (!Array.isArray(data) || (data.length === lastObsCount && lastObsCount !== -1)) return;
+        lastObsCount = data.length;
+
+        const list = $('observationList');
+        list.innerHTML = '';
+        for (const obs of [...data].reverse()) {
+          const el = document.createElement('div');
+          el.className = 'obs-item';
+          const time = new Date(obs.timestamp).toLocaleTimeString();
+          el.innerHTML = `<span class="obs-time">${time}</span><span class="obs-priority ${obs.priority}">${obs.priority}</span>${obs.content}`;
+          list.appendChild(el);
+        }
+      } catch {}
+    }
+
+    async function pollAnomalies() {
+      try {
+        const data = await (await fetch('/api/anomalies')).json();
+        if (!Array.isArray(data)) return;
+
+        $('anomalyCount').textContent = data.length;
+        const hasCritical = data.some(a => a.severity === 'critical');
+        const hasWarning = data.some(a => a.severity === 'warning');
+        if (hasCritical) {
+          $('anomalyCount').style.color = 'var(--red)';
+          $('anomalyStatus').textContent = 'Issues detected';
+          $('anomalyStatus').style.color = 'var(--red)';
+        } else if (hasWarning) {
+          $('anomalyCount').style.color = 'var(--orange)';
+          $('anomalyStatus').textContent = 'Warnings';
+          $('anomalyStatus').style.color = 'var(--orange)';
+        } else {
+          $('anomalyCount').style.color = 'var(--green)';
+          $('anomalyStatus').textContent = 'Normal';
+          $('anomalyStatus').style.color = 'var(--green)';
+        }
+
+        const list = $('anomalyList');
+        if (data.length === 0) {
+          list.innerHTML = '<div class="trace-empty">No anomalies detected. All metrics within normal range.</div>';
+          return;
+        }
+
+        list.innerHTML = '';
+        for (const a of data) {
+          const el = document.createElement('div');
+          el.className = `anomaly-item ${a.severity}`;
+          el.innerHTML = `<div class="anomaly-type ${a.type}">${a.type.replace(/_/g, ' ')}</div><div>${a.message}</div>`;
+          list.appendChild(el);
+        }
+      } catch {}
+    }
+
+    setInterval(pollMemories, 1500);
+    setInterval(pollObservations, 2000);
+    setInterval(pollAnomalies, 2000);
+
+    // Initial load — populate everything from persisted data
+    pollUsage();
+    pollMemories();
+    pollObservations();
+    pollAnomalies();
+    loadTapesSessions();
+
+    // ── Helpers ──
+    function addMsg(role, text) {
+      const el = document.createElement('div');
+      el.className = `msg ${role}`;
+      el.textContent = text;
+      $('transcript').appendChild(el);
+      scrollToBottom();
+      return el;
+    }
+
+    function scrollToBottom() { $('transcriptArea').scrollTop = $('transcriptArea').scrollHeight; }
+
+    function addTrace(provider, latencyMs, tokens, status, method, path) {
+      const traces = $('traces');
+      const empty = traces.querySelector('.trace-empty');
+      if (empty) empty.remove();
+
+      traceCount++;
+      $('traceCount').textContent = `${traceCount} request${traceCount !== 1 ? 's' : ''}`;
+
+      const el = document.createElement('div');
+      el.className = 'trace-item';
+      const providerClass = provider.toLowerCase().replace(/\s+/g, '-');
+      const latencyClass = latencyMs > 2000 ? 'very-slow' : latencyMs > 500 ? 'slow' : '';
+      const time = new Date().toLocaleTimeString();
+
+      el.innerHTML = `
+        <div class="trace-header">
+          <span class="trace-provider ${providerClass}">${provider}</span>
+          ${latencyMs != null ? `<span class="trace-latency ${latencyClass}">${latencyMs}ms</span>` : ''}
+        </div>
+        <div class="trace-details">
+          <span class="trace-detail"><span class="trace-status"></span> ${status}</span>
+          ${tokens ? `<span class="trace-detail">tokens: ${tokens}</span>` : ''}
+          <span class="trace-detail">${method} ${path}</span>
+          <span class="trace-detail">${time}</span>
+        </div>
+      `;
+      traces.prepend(el);
+    }
+
+    // ── Session management ──
+    window.clearSession = async () => {
+      if (!confirm('Clear current session data? Memories will be kept.')) return;
+      await fetch('/api/session/clear', { method: 'POST' });
+      $('transcript').innerHTML = '';
+      $('traces').innerHTML = '<div class="trace-empty">Session cleared.</div>';
+      traceCount = 0;
+      $('traceCount').textContent = '0 requests';
+      lastTurnCount = -1;
+      lastObsCount = -1;
+      // Reset latency bars
+      latencies.stt = []; latencies.llm = []; latencies.tts = [];
+      updateLatencyUI();
+      pollUsage();
+      pollObservations();
+      pollAnomalies();
+    };
+
+    // ── Load tapes sessions into picker + traces ──
+    async function loadTapesSessions() {
+      try {
+        const data = await (await fetch('/api/tapes/overview')).json();
+        if (!data?.sessions?.length) return;
+
+        const picker = $('sessionPicker');
+        for (const s of data.sessions) {
+          const opt = document.createElement('option');
+          opt.value = s.id;
+          const time = new Date(s.start_time).toLocaleString();
+          const cost = `$${s.total_cost.toFixed(4)}`;
+          opt.textContent = `${time} — ${s.message_count} msgs, ${cost}`;
+          picker.appendChild(opt);
+        }
+
+        picker.addEventListener('change', () => loadSession(picker.value));
+      } catch { /* deck not available */ }
+    }
+
+    async function loadSession(sessionId) {
+      if (sessionId === 'current') {
+        viewingPastSession = false;
+        lastTurnCount = -1;
+        lastObsCount = -1;
+        pollUsage();
+        pollObservations();
+        return;
+      }
+
+      viewingPastSession = true;
+
+      try {
+        const data = await (await fetch(`/api/tapes/session/${encodeURIComponent(sessionId)}`)).json();
+        if (!data?.messages) return;
+
+        // Show session in transcript
+        $('transcript').innerHTML = '';
+        for (const msg of data.messages) {
+          if (msg.role === 'user' || msg.role === 'assistant') {
+            addMsg(msg.role, msg.text || '(no text)');
+          }
+        }
+
+        // Show session traces
+        const tracesEl = $('traces');
+        tracesEl.innerHTML = '';
+        traceCount = 0;
+        for (const msg of data.messages) {
+          if (msg.role === 'assistant' && msg.total_tokens > 0) {
+            addTrace(
+              `${msg.model || 'LLM'}`,
+              msg.delta_ns ? Math.round(msg.delta_ns / 1_000_000) : null,
+              msg.total_tokens,
+              200, 'POST', '/v1/messages'
+            );
+          }
+        }
+
+        // Update cost display from session summary
+        if (data.summary) {
+          $('totalCost').textContent = `$${data.summary.total_cost.toFixed(4)}`;
+          $('totalTokens').textContent = (data.summary.input_tokens + data.summary.output_tokens).toLocaleString();
+          $('inputTokens').textContent = data.summary.input_tokens.toLocaleString();
+          $('outputTokens').textContent = data.summary.output_tokens.toLocaleString();
+          $('inputCost').textContent = `$${data.summary.input_cost.toFixed(6)}`;
+          $('outputCost').textContent = `$${data.summary.output_cost.toFixed(6)}`;
+        }
+      } catch (err) {
+        console.error('Failed to load session:', err);
+      }
+    }
+  </script>
+</body>
+</html>

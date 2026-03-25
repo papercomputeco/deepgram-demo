@@ -1,0 +1,18 @@
+{
+  "name": "composite-voice-tapes-demo",
+  "version": "1.0.0",
+  "description": "See everything your voice agent does. Change zero lines of code.",
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=.env server.js",
+    "tapes": "tapes serve proxy",
+    "tapes:deck": "tapes deck --web --port 8888 -s .tapes/traces.db",
+    "start": "concurrently --names tapes-proxy,tapes-deck,app \"npm run tapes\" \"npm run tapes:deck\" \"npm run dev\""
+  },
+  "dependencies": {
+    "@lukeocodes/composite-voice": "^0.1.0",
+    "concurrently": "^9.1.2",
+    "express": "^5.1.0",
+    "ws": "^8.18.0"
+  }
+}
