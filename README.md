@@ -7,90 +7,60 @@ A voice agent with full observability. [Composite Voice](https://github.com/luke
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Browser                                                            │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │  Composite Voice SDK                                          │  │
-│  │  ┌──────────┐   ┌──────────────┐   ┌──────────┐              │  │
-│  │  │DeepgramSTT│   │ AnthropicLLM │   │DeepgramTTS│              │  │
-│  │  │ (Nova-3)  │   │  (Haiku 4.5) │   │ (Aura-2)  │              │  │
-│  │  └─────┬─────┘   └──────┬───────┘   └─────┬─────┘              │  │
-│  │        │                │                  │                    │  │
-│  │        │  proxyUrl:     │  proxyUrl:       │  proxyUrl:         │  │
-│  │        │  /proxy/       │  /proxy/         │  /proxy/           │  │
-│  │        │  deepgram      │  anthropic       │  deepgram          │  │
-│  └────────┼────────────────┼──────────────────┼────────────────────┘  │
-└───────────┼────────────────┼──────────────────┼──────────────────────┘
-            │                │                  │
-            ▼                ▼                  ▼
-┌───────────────────────────────────────────────────────────────────────┐
-│  Express Server (:3010)                                               │
-│                                                                       │
-│  ┌─────────────────────┐  ┌──────────────────────────────────────┐   │
-│  │ Composite Voice      │  │ Custom Anthropic middleware          │   │
-│  │ proxy.middleware      │  │ • Injects memories into system      │   │
-│  │ (Deepgram routes)    │  │   prompt                            │   │
-│  │                      │  │ • Extracts tokens from SSE stream   │   │
-│  │                      │  │ • Parses [MEMORY:] tags             │   │
-│  │                      │  │ • Reports latency for anomalies     │   │
-│  └──────────┬───────────┘  └──────────────────┬──────────────────┘   │
-│             │                                  │                      │
-│             │ direct                           │ via Tapes            │
-└─────────────┼──────────────────────────────────┼──────────────────────┘
-              │                                  │
-              ▼                                  ▼
-   ┌─────────────────┐              ┌────────────────────┐
-   │  Deepgram API    │              │  Tapes Proxy       │
-   │  • STT (WS)      │              │  (:8090)           │
-   │  • TTS (WS)      │              │                    │
-   └─────────────────┘              │  Records to SQLite  │
-                                     │  .tapes/traces.db   │
-                                     └─────────┬──────────┘
-                                               │
-                                               ▼
-                                    ┌─────────────────┐
-                                    │  Anthropic API   │
-                                    │  (Claude Haiku)  │
-                                    └─────────────────┘
+┌──────────────────────────────────────┐
+│            Browser                   │
+│                                      │
+│   Composite Voice SDK                │
+│   DeepgramSTT ─ AnthropicLLM ─ DeepgramTTS
+│       │              │            │  │
+└───────┼──────────────┼────────────┼──┘
+        │              │            │
+        ▼              ▼            ▼
+┌──────────────────────────────────────┐
+│        Express Server (:3010)        │
+│                                      │
+│   /proxy/deepgram    /proxy/anthropic│
+│     (direct)       (via Tapes proxy) │
+└───────┬──────────────┬───────────────┘
+        │              │
+        ▼              ▼
+  Deepgram API   Tapes Proxy (:8090)
+  (STT + TTS)     ┌──────────────┐
+                   │ records to   │
+                   │ SQLite       │
+                   └──────┬───────┘
+                          ▼
+                    Anthropic API
+                   (Claude Haiku)
 ```
 
-### Data flow per voice turn
+### Data flow per turn
 
 ```
- You speak    STT         LLM              TTS        You hear
-    │          │            │                │            │
-    │  audio   │ transcript │   response     │   audio    │
-    ├─────────►├───────────►├───────────────►├───────────►│
-    │          │            │                │            │
-    │  Deepgram│  Anthropic │   Deepgram     │  Browser   │
-    │  Nova-3  │  Haiku 4.5 │   Aura-2       │  AudioCtx  │
-    │          │            │                │            │
-    │    WS    │ HTTP (SSE) │      WS        │            │
-    │  direct  │ via Tapes  │   direct       │            │
-              │            │
-              │  ┌─────────┤
-              │  │ Tapes    │
-              │  │ records: │
-              │  │ • tokens │
-              │  │ • latency│
-              │  │ • req/res│
-              │  └──────────┘
+You speak ──► Deepgram STT ──► Anthropic LLM ──► Deepgram TTS ──► You hear
+               (Nova-3)         (Haiku 4.5)        (Aura-2)
+               WebSocket        HTTP/SSE            WebSocket
+               direct           via Tapes           direct
+                                  │
+                                  ▼
+                           .tapes/traces.db
+                           tokens, latency, req/res
 ```
 
 ### Telemetry isolation
 
+This project uses a local `.tapes/` directory. Voice traces stay separate from your coding agent telemetry.
+
 ```
-~/.tapes/                         ./deepgram-demo/.tapes/
-├── config.toml                   ├── config.toml
-├── tapes.sqlite                  ├── traces.db
-│                                 ├── memory.json
-│   Global instance               ├── observations.json
-│   • Coding agents               └── usage.json
-│   • Claude Code sessions
-│   • Port :8080                      Project instance
-│                                     • Voice agent only
-│                                     • Port :8090
-│   They don't share data.           • Separate SQLite DB
+~/.tapes/                    .tapes/ (this project)
+├── config.toml              ├── config.toml
+├── tapes.sqlite             ├── traces.db
+│                            ├── memory.json
+│  Global instance           ├── observations.json
+│  Coding agents             └── usage.json
+│  Port :8080
+│                             Voice agent only
+│  Separate databases.        Port :8090
 ```
 
 ## Setup
