@@ -3,7 +3,7 @@ import { createServer } from 'http';
 import { createExpressProxy } from '@lukeocodes/composite-voice/proxy';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -138,6 +138,161 @@ function computeCost(turn) {
   };
 }
 
+// ── Self-awareness: let the voice agent inspect and modify its own code ──
+const MAX_TOOL_ROUNDS = 5;
+
+const SELF_AWARE_TOOLS = [
+  {
+    name: 'read_source_code',
+    description: 'Read a source file from this voice agent project to inspect your own code, config, or data.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Relative path from project root, e.g. "server.js" or "public/index.html"' }
+      },
+      required: ['file_path']
+    }
+  },
+  {
+    name: 'list_project_files',
+    description: 'List files and directories in the voice agent project.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: 'Relative directory path. Defaults to project root.' }
+      }
+    }
+  },
+  {
+    name: 'modify_code',
+    description: 'Modify the voice agent source code using Claude Code. Spawns an AI coding agent that can read, edit, and create files. Changes take effect after a server restart.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'Detailed description of the code change to make' }
+      },
+      required: ['task']
+    }
+  }
+];
+
+async function executeTool(name, input) {
+  switch (name) {
+    case 'read_source_code': {
+      const safePath = join(__dirname, (input.file_path || '').replace(/\.\./g, ''));
+      try {
+        const content = readFileSync(safePath, 'utf-8');
+        return JSON.stringify({ file: input.file_path, lines: content.split('\n').length, content });
+      } catch (err) {
+        return JSON.stringify({ error: err.message });
+      }
+    }
+    case 'list_project_files': {
+      const dir = join(__dirname, (input.directory || '.').replace(/\.\./g, ''));
+      try {
+        const entries = readdirSync(dir, { withFileTypes: true })
+          .filter(e => !e.name.startsWith('.') && e.name !== 'node_modules')
+          .map(e => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' }));
+        return JSON.stringify({ directory: input.directory || '.', entries });
+      } catch (err) {
+        return JSON.stringify({ error: err.message });
+      }
+    }
+    case 'modify_code': {
+      try {
+        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        let result = '';
+        for await (const msg of query({
+          prompt: `You are modifying a Deepgram + Anthropic voice agent project at ${__dirname}.\n\nTask: ${input.task}`,
+          options: {
+            cwd: __dirname,
+            allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep'],
+            permissionMode: 'acceptEdits',
+            maxTurns: 15,
+          },
+        })) {
+          if ('result' in msg) result = msg.result;
+        }
+        return JSON.stringify({ success: true, summary: result.slice(0, 2000) });
+      } catch (err) {
+        return JSON.stringify({ error: `modify_code failed: ${err.message}` });
+      }
+    }
+    default:
+      return JSON.stringify({ error: `Unknown tool: ${name}` });
+  }
+}
+
+// Buffer and parse a streaming SSE response from Anthropic
+async function consumeSSEStream(response) {
+  const rawChunks = [];
+  const responseHeaders = {};
+  response.headers.forEach((value, key) => { responseHeaders[key] = value; });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let sseBuffer = '';
+  let responseText = '';
+  const blockMap = {};
+  let stopReason = '';
+  const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    rawChunks.push(value);
+    sseBuffer += decoder.decode(value, { stream: true });
+
+    const lines = sseBuffer.split('\n');
+    sseBuffer = lines.pop();
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const data = line.slice(6).trim();
+      if (data === '[DONE]') continue;
+      try {
+        const evt = JSON.parse(data);
+        if (evt.type === 'message_start' && evt.message?.usage) {
+          usage.inputTokens = evt.message.usage.input_tokens || 0;
+          usage.cacheReadTokens = evt.message.usage.cache_read_input_tokens || 0;
+          usage.cacheCreationTokens = evt.message.usage.cache_creation_input_tokens || 0;
+        }
+        if (evt.type === 'content_block_start') {
+          blockMap[evt.index] = { ...evt.content_block };
+          if (evt.content_block.type === 'tool_use') blockMap[evt.index]._inputJson = '';
+        }
+        if (evt.type === 'content_block_delta') {
+          const blk = blockMap[evt.index];
+          if (blk && evt.delta.type === 'text_delta') {
+            blk.text = (blk.text || '') + evt.delta.text;
+            responseText += evt.delta.text;
+          }
+          if (blk && evt.delta.type === 'input_json_delta') {
+            blk._inputJson = (blk._inputJson || '') + evt.delta.partial_json;
+          }
+        }
+        if (evt.type === 'message_delta') {
+          stopReason = evt.delta?.stop_reason || '';
+          if (evt.usage) usage.outputTokens = evt.usage.output_tokens || 0;
+        }
+      } catch {}
+    }
+  }
+
+  const contentBlocks = Object.keys(blockMap)
+    .sort((a, b) => Number(a) - Number(b))
+    .map(idx => {
+      const blk = { ...blockMap[idx] };
+      if (blk.type === 'tool_use' && typeof blk._inputJson === 'string') {
+        try { blk.input = JSON.parse(blk._inputJson); } catch { blk.input = {}; }
+        delete blk._inputJson;
+      }
+      return blk;
+    });
+
+  return { rawChunks, responseHeaders, contentBlocks, stopReason, usage, responseText, status: response.status };
+}
+
 const app = express();
 const server = createServer(app);
 
@@ -147,7 +302,7 @@ const proxy = createExpressProxy({
   pathPrefix: '/proxy',
 });
 
-// Intercept Anthropic calls, route through Tapes, extract token usage from SSE stream
+// Intercept Anthropic calls — self-aware tool loop + Tapes proxy
 app.use('/proxy/anthropic', async (req, res) => {
   const apiPath = req.url || '/';
   const targetUrl = `${TAPES_PROXY}${apiPath}`;
@@ -159,24 +314,24 @@ app.use('/proxy/anthropic', async (req, res) => {
     if (value === undefined) continue;
     headers[key] = Array.isArray(value) ? value.join(', ') : value;
   }
-
   headers['x-api-key'] = process.env.ANTHROPIC_API_KEY;
   headers['anthropic-version'] = '2023-06-01';
 
-  // Parse request body — inject memories into system prompt
+  // Read request body
   let reqBody;
   try {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     reqBody = Buffer.concat(chunks);
-  } catch (err) {
+  } catch {
     res.status(400).json({ error: 'bad_request' });
     return;
   }
 
+  let parsed;
   let model = 'claude-haiku-4-5-20251001';
   try {
-    const parsed = JSON.parse(reqBody.toString());
+    parsed = JSON.parse(reqBody.toString());
     model = parsed.model || model;
 
     // Inject memories into the system prompt
@@ -186,111 +341,107 @@ app.use('/proxy/anthropic', async (req, res) => {
 
     const memoryInstruction = `\n\nIMPORTANT: When the user shares personal info, silently append a [MEMORY: ...] tag at the very end of your response. The tag is stripped before speech — the user will NEVER hear it. Do NOT mention the tag, say "I'll remember that", or acknowledge the memory process. Just respond naturally and append the tag silently. Example response: "Nice to meet you! [MEMORY: User's name is Brian]" — the user only hears "Nice to meet you!"`;
 
+    const selfAwarePrompt = `\n\nYou are a self-aware voice agent that can inspect and modify your own source code. Your project is at ${__dirname}. Key files: server.js (main server), public/ (frontend), package.json (dependencies). Use the read_source_code and list_project_files tools when the user asks about your code or features. Use modify_code to make changes (they take effect on restart). Keep spoken responses concise — the user is listening, not reading.`;
+
     if (typeof parsed.system === 'string') {
-      parsed.system += memoryBlock + memoryInstruction;
+      parsed.system += memoryBlock + memoryInstruction + selfAwarePrompt;
     } else if (Array.isArray(parsed.system)) {
-      parsed.system.push({ type: 'text', text: memoryBlock + memoryInstruction });
+      parsed.system.push({ type: 'text', text: memoryBlock + memoryInstruction + selfAwarePrompt });
     }
 
-    reqBody = Buffer.from(JSON.stringify(parsed));
-    // Update content-length since body changed
-    headers['content-length'] = String(reqBody.length);
-  } catch {}
+    // Inject self-awareness tools
+    parsed.tools = [...(parsed.tools || []), ...SELF_AWARE_TOOLS];
+  } catch {
+    res.status(400).json({ error: 'bad_request' });
+    return;
+  }
 
   try {
-    const upstream = await fetch(targetUrl, {
-      method: req.method,
-      headers,
-      body: ['GET', 'HEAD'].includes(req.method) ? undefined : reqBody,
-    });
+    let messages = [...parsed.messages];
+    const allTurnUsage = [];
 
-    res.status(upstream.status);
-    upstream.headers.forEach((value, key) => {
-      if (!['connection', 'keep-alive', 'transfer-encoding', 'content-encoding'].includes(key.toLowerCase())) {
-        res.setHeader(key, value);
-      }
-    });
+    // Tool use loop — iterate until we get a final text response
+    for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+      const requestBody = JSON.stringify({ ...parsed, messages });
+      headers['content-length'] = String(Buffer.byteLength(requestBody));
 
-    if (!upstream.body) { res.end(); return; }
+      const upstream = await fetch(targetUrl, {
+        method: 'POST',
+        headers,
+        body: requestBody,
+      });
 
-    // Stream through to client while extracting usage + memory tags from SSE events
-    const turn = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, model, timestamp: new Date().toISOString() };
-    let sseBuffer = '';
-    let responseText = ''; // accumulate full response to scan for [MEMORY: ...]
+      const sse = await consumeSSEStream(upstream);
+      allTurnUsage.push(sse.usage);
 
-    const reader = upstream.body.getReader();
-    const decoder = new TextDecoder();
+      if (sse.stopReason !== 'tool_use' || round === MAX_TOOL_ROUNDS) {
+        // Final response — forward buffered SSE bytes to client
+        res.status(sse.status);
+        for (const [key, value] of Object.entries(sse.responseHeaders)) {
+          if (!['connection', 'keep-alive', 'transfer-encoding', 'content-encoding'].includes(key)) {
+            res.setHeader(key, value);
+          }
+        }
+        for (const chunk of sse.rawChunks) {
+          res.write(chunk);
+        }
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+        // Extract [MEMORY: ...] tags from the response
+        const memoryPattern = /\[MEMORY:\s*(.+?)\]/gi;
+        let match;
+        while ((match = memoryPattern.exec(sse.responseText)) !== null) {
+          addMemory(match[1].trim());
+        }
 
-      // Forward raw bytes to client immediately
-      res.write(value);
-
-      // Parse SSE events to extract usage
-      sseBuffer += decoder.decode(value, { stream: true });
-      const lines = sseBuffer.split('\n');
-      sseBuffer = lines.pop(); // keep incomplete line
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') continue;
-
+        // Heuristic memory extraction from the original user message
         try {
-          const event = JSON.parse(data);
-
-          // message_start has initial usage (input_tokens)
-          if (event.type === 'message_start' && event.message?.usage) {
-            turn.inputTokens = event.message.usage.input_tokens || 0;
-            turn.cacheReadTokens = event.message.usage.cache_read_input_tokens || 0;
-            turn.cacheCreationTokens = event.message.usage.cache_creation_input_tokens || 0;
-          }
-
-          // message_delta has final output usage
-          if (event.type === 'message_delta' && event.usage) {
-            turn.outputTokens = event.usage.output_tokens || 0;
-          }
-
-          // Accumulate text chunks for memory extraction
-          if (event.type === 'content_block_delta' && event.delta?.text) {
-            responseText += event.delta.text;
+          const userMsgs = (parsed.messages || []).filter(m => m.role === 'user');
+          const lastUser = userMsgs.at(-1);
+          if (lastUser) {
+            const text = typeof lastUser.content === 'string'
+              ? lastUser.content
+              : (lastUser.content || []).filter(b => b.type === 'text').map(b => b.text).join(' ');
+            extractMemoriesFromText(text, sse.responseText);
           }
         } catch {}
+
+        // Record combined usage across all tool rounds
+        const turn = allTurnUsage.reduce((acc, u) => ({
+          inputTokens: acc.inputTokens + u.inputTokens,
+          outputTokens: acc.outputTokens + u.outputTokens,
+          cacheReadTokens: acc.cacheReadTokens + u.cacheReadTokens,
+          cacheCreationTokens: acc.cacheCreationTokens + u.cacheCreationTokens,
+        }), { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
+        turn.model = model;
+        turn.timestamp = new Date().toISOString();
+        turn.durationMs = Date.now() - startTime;
+        turn.toolRounds = round;
+
+        getCurrentSession().turns.push(turn);
+        saveUsage();
+        observe(turn);
+        console.log(`  LLM turn: ${turn.inputTokens} in / ${turn.outputTokens} out (${turn.durationMs}ms, ${round} tool rounds)`);
+
+        res.end();
+        return;
       }
-    }
 
-    // Extract [MEMORY: ...] tags from the LLM response (if the model outputs them)
-    const memoryPattern = /\[MEMORY:\s*(.+?)\]/gi;
-    let match;
-    while ((match = memoryPattern.exec(responseText)) !== null) {
-      addMemory(match[1].trim());
-    }
-
-    // Heuristic memory extraction from the user's message (doesn't rely on LLM tagging)
-    try {
-      const parsed = JSON.parse(reqBody.toString());
-      const userMsgs = (parsed.messages || []).filter(m => m.role === 'user');
-      const lastUser = userMsgs.at(-1);
-      if (lastUser) {
-        const text = typeof lastUser.content === 'string'
-          ? lastUser.content
-          : (lastUser.content || []).filter(b => b.type === 'text').map(b => b.text).join(' ');
-        extractMemoriesFromText(text, responseText);
+      // Tool use — execute each tool and build follow-up messages
+      const toolBlocks = sse.contentBlocks.filter(b => b.type === 'tool_use');
+      const toolResults = [];
+      for (const tool of toolBlocks) {
+        console.log(`  Tool: ${tool.name}(${JSON.stringify(tool.input).slice(0, 100)})`);
+        const result = await executeTool(tool.name, tool.input);
+        toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: result });
       }
-    } catch {}
 
-    turn.durationMs = Date.now() - startTime;
-
-    // Record this turn in current session
-    getCurrentSession().turns.push(turn);
-    saveUsage();
-
-    observe(turn);
-    console.log(`  LLM turn: ${turn.inputTokens} in / ${turn.outputTokens} out (${turn.durationMs}ms)`);
-
-    res.end();
+      // Append assistant response + tool results for next round
+      messages = [
+        ...messages,
+        { role: 'assistant', content: sse.contentBlocks },
+        { role: 'user', content: toolResults },
+      ];
+    }
   } catch (err) {
     console.error('Tapes proxy error:', err.message);
     res.status(502).json({ error: 'tapes_proxy_error', message: err.message });
@@ -619,12 +770,13 @@ app.use('/sdk', express.static(
 app.use(express.static(join(__dirname, 'public')));
 
 server.listen(PORT, () => {
-  console.log(`\n  Composite Voice + Tapes Demo`);
-  console.log(`  ───────────────────────────`);
+  console.log(`\n  Composite Voice + Tapes Demo (Self-Aware)`);
+  console.log(`  ──────────────────────────────────────────`);
   console.log(`  App:         http://localhost:${PORT}`);
   console.log(`  Tapes Proxy: ${TAPES_PROXY} (Anthropic LLM calls)`);
   console.log(`  Tapes Deck:  ${TAPES_DECK} (trace dashboard)`);
   console.log(`  SQLite:      ${DB_PATH}`);
   console.log(`  Usage API:   http://localhost:${PORT}/api/usage`);
-  console.log(`\n  "See everything your voice agent does. Change zero lines of code."\n`);
+  console.log(`  Tools:       read_source_code, list_project_files, modify_code`);
+  console.log(`\n  "A voice agent that can see and change its own code."\n`);
 });

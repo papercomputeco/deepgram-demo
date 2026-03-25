@@ -10,6 +10,7 @@
     "start": "concurrently --names tapes-proxy,tapes-deck,app \"npm run tapes\" \"npm run tapes:deck\" \"npm run dev\""
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.83",
     "@lukeocodes/composite-voice": "^0.1.0",
     "concurrently": "^9.1.2",
     "express": "^5.1.0",
